@@ -141,6 +141,19 @@ nina_capture_image(download=False)
 
 ---
 
+## Troubleshooting
+
+**Tool calls fail with `Input validation error: '...' is not of type 'object'`**
+Some MCP clients (including some Claude Desktop builds) flatten JSON-Schema `$ref`/`$defs` in tool schemas, so arguments arrive as strings and fail validation. The server now inlines all `$ref`s at startup, so schemas are self-contained. If you still see this, pull the latest version and restart Claude Desktop.
+
+**Server never appears in Claude Desktop**
+The config example uses `"command": "uv"`, which requires `uv` on the PATH of the Claude Desktop process. If `uv` was installed per-user or via pip, use the full path instead, e.g. `"command": "C:/Python314/Scripts/uv.exe"`.
+
+**Locked-down (corporate) machines**
+If an Application Control policy blocks uv-managed Python downloads, uv falls back to the system Python. Python 3.13 and 3.14 both work.
+
+---
+
 ## Reference
 
 ### Tracking modes

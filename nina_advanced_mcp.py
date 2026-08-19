@@ -4098,7 +4098,7 @@ class ImageThumbnailInput(BaseModel):
     width: Optional[int] = None  # Optional width of thumbnail
     height: Optional[int] = None  # Optional height of thumbnail
 
-@mcp.tool()
+# Note: duplicate implementation kept for reference; not registered as a tool
 async def nina_get_image_history(input: ImageHistoryInput) -> Dict[str, Any]:
     """Get image history from NINA astronomy software.
     
@@ -4789,6 +4789,34 @@ async def nina_help(input: HelpInput) -> Dict[str, Any]:
         logger.error(f"Error in nina_help: {str(e)}")
         return create_error_response("NINAHelpError", str(e))
 
+# --- Schema compatibility fix ---
+# Some MCP clients (e.g. current Claude Desktop builds) flatten JSON-Schema
+# $ref/$defs into empty schemas, causing clients to send stringified arguments
+# that fail validation. Inline all $refs so tool schemas are self-contained.
+def _inline_refs(schema, defs):
+    if isinstance(schema, dict):
+        if "$ref" in schema:
+            ref = schema["$ref"].split("/")[-1]
+            merged = dict(defs.get(ref, {}))
+            merged.update({k: v for k, v in schema.items() if k != "$ref"})
+            return _inline_refs(merged, defs)
+        return {k: _inline_refs(v, defs) for k, v in schema.items()}
+    if isinstance(schema, list):
+        return [_inline_refs(x, defs) for x in schema]
+    return schema
+
+def _flatten_tool_schemas():
+    for _t in mcp._tool_manager._tools.values():
+        p = _t.parameters
+        if isinstance(p, dict) and "$defs" in p:
+            defs = p.get("$defs", {})
+            p = _inline_refs(p, defs)
+            p.pop("$defs", None)
+            _t.parameters = p
+
+_flatten_tool_schemas()
+# --- end schema compatibility fix ---
+
 if __name__ == "__main__":
     import signal
     import sys
@@ -4808,4 +4836,4 @@ if __name__ == "__main__":
     logger.info(f"IMAGE_SAVE_DIR: {IMAGE_SAVE_DIR}")
     
     # Run the FastMCP server
-    mcp.run() 
+    mcp.run()
