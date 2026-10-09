@@ -33,7 +33,8 @@ Gives an AI agent (Claude, or any MCP-compatible client) natural-language contro
 - [N.I.N.A. 3.0+](https://nighttime-imaging.eu/)
 - [NINA Advanced API plugin v2](https://github.com/christian-photo/ninaAPI) — install via the NINA plugin manager
 - Python 3.10+ (tested on 3.13)
-- [`uv`](https://github.com/astral-sh/uv) package manager
+- Optional: [`uv`](https://github.com/astral-sh/uv) package manager (not usable with Smart App Control on, see below)
+- Optional: [ASTAP](https://www.hnsky.org/astap.htm) with the D05 star database, for plate solving
 - An MCP-compatible AI agent — [Claude Desktop](https://claude.ai/download) recommended
 
 ---
@@ -62,7 +63,40 @@ copy .env.example .env
 
 ### 4. Configure Claude Desktop
 
-Add to `%APPDATA%\Claude\claude_desktop_config.json`:
+**Option A - dedicated virtual environment (recommended, required with Windows Smart App Control).**
+
+Install the dependencies once:
+
+```bat
+cd C:\path\to\nina-advanced-api-mcp
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install "fastmcp==1.0" fastapi uvicorn pydantic aiohttp requests python-dotenv
+```
+
+Then add to `%APPDATA%\Claude\claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "nina": {
+      "command": "C:\\path\\to\\nina-advanced-api-mcp\\.venv\\Scripts\\python.exe",
+      "args": ["C:\\path\\to\\nina-advanced-api-mcp\\nina_advanced_mcp.py"],
+      "env": {
+        "NINA_HOST": "localhost",
+        "NINA_PORT": "1888",
+        "LOG_LEVEL": "INFO",
+        "IMAGE_SAVE_DIR": "C:/Users/YOUR_USERNAME/Pictures/NINA",
+        "AIOHTTP_NO_EXTENSIONS": "1"
+      }
+    }
+  }
+}
+```
+
+- `AIOHTTP_NO_EXTENSIONS=1` makes aiohttp use its pure-Python HTTP parser. Smart App Control blocks the compiled parser (`_http_parser.*.pyd`); aiohttp falls back anyway, but the setting stops the block events.
+- Start-up time with this method: approx. 1.5 s.
+
+**Option B - `uv run` (only if Smart App Control / WDAC is off).**
 
 ```json
 {
@@ -88,9 +122,11 @@ Add to `%APPDATA%\Claude\claude_desktop_config.json`:
 }
 ```
 
+`uv run --with` builds a temporary environment at each start and generates a new, unsigned `fastmcp.exe` launcher. With Smart App Control on, Windows blocks it (`os error 4551`) and the server fails to start, often only in some Claude Desktop sessions.
+
 > **Note:** `NINA_HOST` can be a remote IP address if NINA runs on a separate machine on your network (e.g., a dedicated imaging PC).
 
-> **Important:** Pin `fastmcp==1.0` in the `--with` argument. Later fastmcp releases have breaking API changes that prevent the server from starting.
+> **Important:** Pin `fastmcp==1.0`. Later fastmcp releases have breaking API changes that prevent the server from starting.
 
 Restart Claude Desktop. All NINA tools will appear automatically in your conversation.
 
@@ -116,30 +152,43 @@ Start cooling the camera to -10°C
 
 ---
 
-## Known limitations — Seestar S30 (ASCOM driver)
+## Known limitations - Seestar S30 (native Alpaca)
 
-These quirks apply specifically to the ZWO Seestar S30 via its ASCOM driver in NINA. Other mounts/cameras may not have these behaviors.
+Tested 2026-10-09 with Seestar S30 Alpaca server 1.2.0-3, N.I.N.A. 3.2.0.9001, Advanced API plugin 2.2.15.2, on Windows 11 with Smart App Control on.
+
+Current Seestar firmware has a built-in ASCOM Alpaca server (port `32323`, discovery on UDP `32227`). It exposes Telescope, Camera, Focuser, FilterWheel and Switch. N.I.N.A. finds these as "ASCOM Alpaca" devices; the ASCOM Platform is **not** necessary. The Seestar must be on the same Wi-Fi as the NINA PC (station mode).
 
 | Issue | Workaround |
 |---|---|
-| `nina_slew_mount` returns an error even when the slew succeeds | Always follow with `nina_get_mount_info` to verify actual pointing |
-| Tracking resets to stopped after every slew | Explicitly call `nina_set_tracking_mode` with mode `0` (sidereal) or `1` (lunar) after each slew |
-| Camera disconnects intermittently | Run `nina_connect_camera` before every capture sequence |
-| `download: true` consistently times out | Use `download: false` (background capture); retrieve result via `nina_get_image_thumbnail` |
-| FITS files in the snapshot directory are always 0 bytes | The Seestar ASCOM driver does not write raw FITS through NINA's pipeline; JPEG thumbnails work |
-| `solve: true` causes API timeouts | Plate solving exceeds the MCP timeout; omit the `solve` parameter entirely |
-| RA/Dec coordinates may not reflect actual sky pointing | The Seestar S30 is alt-az; use the native Seestar app to verify target acquisition |
-| Planets appear as single pixels | The Seestar S30 (30mm / 150mm FL) is a wide-field instrument; not suitable for planetary detail |
+| Alpaca server starts approx. 1-2 min after the Seestar app reports the device ready; first NINA scan finds nothing | Wait, then rescan (see next row) |
+| `nina_list_camera_devices` does not rescan; devices added after NINA start are missing | Call `GET /v2/api/equipment/{camera,filterwheel,focuser}/rescan` on the Advanced API, then connect by device ID |
+| On first mount connect, NINA opens a modal **"Synchronize site settings"** dialog; `nina_connect_mount` then returns an error with an empty message | Answer the dialog on the NINA PC. Choose **mount -> N.I.N.A.** The other direction writes the NINA profile site (default 0/0) into the Seestar |
+| Seestar site was overwritten with 0/0 | `PUT /api/v1/telescope/0/sitelatitude` and `.../sitelongitude` on port 32323, set the same values in the NINA profile, reconnect the mount |
+| Slew (`nina_slew_mount`, `wait_for_completion=false`) | Works. Approx. 25 s for a large slew. Verify with `nina_get_mount_info` |
+| Tracking after slew | The Seestar enables tracking after a go-to. Set `nina_set_tracking_mode` mode `0` explicitly anyway |
+| Manual axis motion | No MCP tool yet. Use Alpaca `PUT /api/v1/telescope/0/moveaxis` (`Axis` 0 = azimuth, 1 = altitude, `Rate` 0-6 deg/s; `Rate=0` stops) |
+| `SiteElevation`, `SideOfPier` not implemented by the driver | Harmless; NINA logs INFO messages |
+| Park position | `nina_park_mount` folds the arm; reported altitude approx. -89.8 deg, `AtPark: true` |
+| FITS files | Full 16-bit images (1080 x 1920, RGGB, 2.9 um pixels, approx. 4.15 MB). The 0-byte FITS problem of the old ASCOM path does not occur with Alpaca |
+| `solve: true` in `nina_capture_image` causes API timeouts | Omit `solve`; plate-solve separately (ASTAP) |
+| Planets appear as single pixels | The Seestar S30 (30 mm / 150 mm FL) is a wide-field instrument; not suitable for planetary detail |
 
-**Working image retrieval sequence:**
+**Image retrieval sequence:**
 
 ```
 nina_capture_image(download=False)
-→ nina_get_image_thumbnail(index=0)    # saves JPG to IMAGE_SAVE_DIR/thumbnails/
-→ nina_get_capture_statistics()        # confirms signal: star count, HFR, median ADU
+-> wait for the exposure + approx. 15 s download/save
+-> nina_get_capture_statistics()        # star count, HFR, median ADU
+-> FITS file in the NINA image folder (profile setting ImageFileSettings-FilePath)
 ```
 
----
+Reference values at gain 80 (2026-10-09, overcast): bias/dark median approx. 960 ADU; hot pixels give 50-70 false "stars" in short frames.
+
+### Plate solving (ASTAP)
+
+- Image scale: 2.9 um / 150 mm = 3.99 arcsec/pixel; field of view approx. 1.2 x 2.1 deg. The D05 star database is sufficient.
+- Set in NINA: plate solver ASTAP, `PlateSolveSettings-ASTAPLocation` = `C:\Program Files\astap\astap.exe`, telescope focal length 150 mm, pixel size 2.9 um.
+- The ASTAP installers are not code-signed, but Smart App Control did not block them in the test.
 
 ## Troubleshooting
 
@@ -148,6 +197,12 @@ Some MCP clients (including some Claude Desktop builds) flatten JSON-Schema `$re
 
 **Server never appears in Claude Desktop**
 The config example uses `"command": "uv"`, which requires `uv` on the PATH of the Claude Desktop process. If `uv` was installed per-user or via pip, use the full path instead, e.g. `"command": "C:/Python314/Scripts/uv.exe"`.
+
+**Server fails to start with `Failed to spawn: fastmcp ... An Application Control policy has blocked this file. (os error 4551)`**
+Smart App Control or a WDAC policy blocks the unsigned `fastmcp.exe` that `uv run` generates. Check `Microsoft-Windows-CodeIntegrity/Operational` for events 3033/3077. Use Option A (virtual environment + `python.exe`). In the Claude Desktop log the same block can show as `spawn UNKNOWN`.
+
+**NINA tools return 401 "Not connected to NINA server"**
+Call `nina_connect` once per server process (also after each Claude Desktop restart). If `http://localhost:1888/v2/api/version` does not answer, check that only **one** NINA instance runs: a second instance cannot bind port 1888 (`Only one usage of each socket address`) and runs without the API.
 
 **Locked-down (corporate) machines**
 If an Application Control policy blocks uv-managed Python downloads, uv falls back to the system Python. Python 3.13 and 3.14 both work.
@@ -170,7 +225,7 @@ If an Application Control policy blocks uv-managed Python downloads, uv falls ba
 
 | ID | Filter |
 |---|---|
-| `0` | Filter1 (clear) |
+| `0` | Dark (closed, for dark frames) |
 | `1` | IR |
 | `2` | LP (light pollution) |
 
